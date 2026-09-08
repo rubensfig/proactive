@@ -25,44 +25,51 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+import json
 
-SAMPLE_FILE_MAGIC = 0x5458424D   # "TXBM"
-HEADER_DTYPE = np.dtype([
-    ("magic",       "<u4"),
-    ("version",     "<u2"),
-    ("queue_id",    "<u2"),
-    ("record_size", "<u4"),
-    ("stats_size",  "<u4"),
-    ("num_records", "<u8"),
-    ("nb_tx_desc",  "<u4"),
-    ("burst_size",  "<u4"),
-    ("timer_hz",    "<u8"),
-], align=True)
+SAMPLE_FILE_MAGIC = 0x5458424D  # "TXBM"
+HEADER_DTYPE = np.dtype(
+    [
+        ("magic", "<u4"),
+        ("version", "<u2"),
+        ("queue_id", "<u2"),
+        ("record_size", "<u4"),
+        ("stats_size", "<u4"),
+        ("num_records", "<u8"),
+        ("nb_tx_desc", "<u4"),
+        ("burst_size", "<u4"),
+        ("timer_hz", "<u8"),
+    ],
+    align=True,
+)
 
 
-SAMPLE_DTYPE = np.dtype([
-    ("used",              "<u4"),
-    ("space",             "<u4"),
-
-    ("requested",         "<u2"),
-    ("to_send",           "<u2"),
-    ("sent",              "<u2"),
-    ("occupancy_gated",   "<u2"),
-    ("tx_not_accepted",   "<u2"),
-    ("reserved0",         "<u2"),
-
-    ("cycles_count",      "<u8"),
-    ("cycles_tx",         "<u8"),
-    ("cycles_total",      "<u8"),
-], align=True)
-
+SAMPLE_DTYPE = np.dtype(
+    [
+        ("used", "<u4"),
+        ("space", "<u4"),
+        ("requested", "<u2"),
+        ("to_send", "<u2"),
+        ("sent", "<u2"),
+        ("occupancy_gated", "<u2"),
+        ("tx_not_accepted", "<u2"),
+        ("reserved0", "<u2"),
+        ("cycles_count", "<u8"),
+        ("cycles_tx", "<u8"),
+        ("cycles_total", "<u8"),
+    ],
+    align=True,
+)
 
 
 # matplotlib is optional; only needed if --plot is used
 try:
     import matplotlib
+
     matplotlib.use("Agg")  # no display needed, just save PNGs
     import matplotlib.pyplot as plt
+
     HAVE_MPL = True
 except ImportError:
     HAVE_MPL = False
@@ -70,13 +77,12 @@ except ImportError:
 PERCENTILES = [50, 90, 95, 99, 99.9, 99.99]
 
 
-def discover_files_from_dir(directory):
+def discover_files_from_dir(directory, pattern):
     """Recursively find sample binary files under directory."""
     return sorted(
-        str(path)
-        for path in Path(directory).rglob("samples_q*.bin")
-        if path.is_file()
+        str(path) for path in Path(directory).rglob(pattern) if path.is_file()
     )
+
 
 def discover_files(prefix):
     """Find files matching '<prefix>_q<N>.bin', sorted by queue number."""
@@ -91,6 +97,78 @@ def discover_files(prefix):
 
     files.sort(key=qnum)
     return files
+
+
+def parse_json(fname):
+    metadata_json = None
+    with open(fname, "r") as json_log:
+        metadata_json = json.load(json_log)
+
+    return metadata_json
+
+
+def parse_stdout(fname):
+    with open(fname, "r") as stdout_log:
+        text = stdout_log.read()
+
+        # Match each Queue benchmark block up to the next queue block or EOF.
+        block_re = re.compile(
+            r"=+\s*Queue\s+(\d+)\s+benchmark\s*=+\s*"
+            r"(.*?)(?==+\s*Queue\s+\d+\s+benchmark\s*=+|\Z)",
+            re.DOTALL,
+        )
+
+        # Match generic "key : value" lines.
+        field_re = re.compile(
+            r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*$",
+            re.MULTILINE,
+        )
+
+        # Match:
+        # used=  0 : 1 (0.0020%)
+        # used=512 : 123 (12.34%)
+        histogram_re = re.compile(
+            r"^\s*used\s*=\s*(\d+)\s*:\s*(\d+)\s*"
+            r"\(\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\)\s*$",
+            re.MULTILINE,
+        )
+
+        results = []
+
+        for matchs in block_re.finditer(text):
+            queue_id = int(matchs.group(1))
+            block = matchs.group(2)
+
+        # Everything before histogram heading is the main stats section.
+        stats_text = block.split("TX queue-count histogram:", 1)[0]
+
+        stats = {}
+        for key, value in field_re.findall(stats_text):
+            if "." in value:
+                stats[key] = float(value)
+            else:
+                stats[key] = int(value)
+
+                histogram = []
+
+            for used, count, percent in histogram_re.findall(block):
+                histogram.append(
+                    {
+                        "used": int(used),
+                        "count": int(count),
+                        "percent": float(percent),
+                    }
+                )
+
+            results.append(
+                {
+                    "queue": queue_id,
+                    "stats": stats,
+                    "histogram": histogram,
+                }
+            )
+
+        return results
 
 
 def queue_id_from_filename(fname):
@@ -108,9 +186,7 @@ def load_samples(fname):
         hdr = hdr_arr[0]
 
         if int(hdr["magic"]) != SAMPLE_FILE_MAGIC:
-            raise RuntimeError(
-                f"{fname}: bad magic 0x{int(hdr['magic']):08x}"
-            )
+            raise RuntimeError(f"{fname}: bad magic 0x{int(hdr['magic']):08x}")
 
         if int(hdr["record_size"]) != SAMPLE_DTYPE.itemsize:
             raise RuntimeError(
@@ -136,9 +212,7 @@ def load_samples(fname):
         )
 
         if data.size != n:
-            raise RuntimeError(
-                f"{fname}: expected {n} records, got {data.size}"
-            )
+            raise RuntimeError(f"{fname}: expected {n} records, got {data.size}")
 
     return hdr, stats_raw, data
 
@@ -167,6 +241,7 @@ def print_stats(qid, stats, hdr, data):
         f"burst={int(hdr['burst_size'])} "
         f"timer_hz={int(hdr['timer_hz'])}"
     )
+
     def mean_field(data, field):
         return float(data[field].mean()) if data.size else 0.0
 
@@ -213,33 +288,30 @@ def plot_histogram(qid, data, out_dir, bins):
 
 
 def write_csv(csv_path, all_stats):
-    import csv
-    fieldnames = ["queue", "count", "min", "max", "mean", "std"] + \
-                 [f"p{p}" for p in PERCENTILES]
-    with open(csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for qid, stats in all_stats:
-            if stats is None:
-                continue
-            row = {"queue": qid}
-            row.update(stats)
-            w.writerow(row)
+    all_stats.to_csv(csv_path)
     print(f"\nWrote combined summary CSV to {csv_path}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--prefix", help="outfile_base prefix used by the C program "
-                                      "(auto-discovers <prefix>_q*.bin)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--prefix",
+        help="outfile_base prefix used by the C program "
+        "(auto-discovers <prefix>_q*.bin)",
+    )
     ap.add_argument("--files", nargs="+", help="explicit list of .bin files to process")
     ap.add_argument(
         "--dir",
         help="recursively process all samples_q*.bin files under this directory",
     )
-    ap.add_argument("--plot", action="store_true", help="save a histogram PNG per queue")
-    ap.add_argument("--bins", type=int, default=64, help="number of histogram bins (default 64)")
+    ap.add_argument(
+        "--plot", action="store_true", help="save a histogram PNG per queue"
+    )
+    ap.add_argument(
+        "--bins", type=int, default=64, help="number of histogram bins (default 64)"
+    )
     ap.add_argument("--out-dir", default=".", help="directory to write PNGs/CSV into")
     ap.add_argument("--csv", help="path to write a combined summary CSV")
 
@@ -252,7 +324,9 @@ def main():
     if args.files:
         files = args.files
     elif args.dir:
-        files = discover_files_from_dir(args.dir)
+        files = discover_files_from_dir(args.dir, "samples_q*.bin")
+        stdout_files = discover_files_from_dir(args.dir, "stdout.log")
+        metadata = discover_files_from_dir(args.dir, "metadata.json")
     else:
         files = discover_files(args.prefix)
 
@@ -267,31 +341,83 @@ def main():
     all_stats = []
     all_data = []
 
-    for fname in files:
-        qid = queue_id_from_filename(fname)
-        hdr, qs_raw, data = load_samples(fname)
-        occupancy = data["used"]
-        stats = compute_stats(occupancy)
-        print_stats(qid, stats, hdr, data)
-        all_stats.append((qid, stats))
-        if data.size:
-            all_data.append(occupancy)
+    rows = []
+    histogram_rows = []
 
-        if args.plot and data.size:
-            plot_histogram(qid, occupancy, args.out_dir, args.bins)
+    for fnames in files:
+        for sample_fname in files:
+            run_dir = os.path.dirname(sample_fname)
 
-    # Combined (all queues pooled) stats
-    if len(all_data) > 1:
-        combined = np.concatenate(all_data)
-        combined_stats = compute_stats(combined)
-        print_stats("ALL", combined_stats, hdr, data)
-        all_stats.append(("ALL", combined_stats))
-        if args.plot:
-            plot_histogram("ALL", combined, args.out_dir, args.bins)
+            stdout_fname = os.path.join(run_dir, "stdout.log")
+            metadata_fname = os.path.join(run_dir, "metadata.json")
 
+            qid = queue_id_from_filename(sample_fname)
+            hdr, qs_raw, data = load_samples(sample_fname)
+
+            occupancy = data["used"]
+            stats = compute_stats(occupancy)
+
+            stdout_data = parse_stdout(stdout_fname)
+            metadata_data = parse_json(metadata_fname)
+
+            # Find stdout entry corresponding to this queue.
+            stdout_entry = next(
+                (entry for entry in stdout_data if entry["queue"] == qid), None
+            )
+            stdout_entry = next(
+                (
+                    entry
+                    for entry in reversed(stdout_data)
+                    if int(entry.get("queue", -1)) == int(qid)
+                ),
+                None
+            )
+
+            if stdout_entry is None:
+                stdout_stats = {}
+                stdout_histogram = []
+            else:
+                stdout_stats = stdout_entry.get("stats", {})
+                stdout_histogram = stdout_entry.get("histogram", [])
+
+            row = {
+                "queue_id": qid,
+                # metadata.json
+                **metadata_data,
+                # stdout stats
+                **{f"stdout_{k}": v for k, v in stdout_stats.items()},
+                # stats calculated from samples_q*.bin
+                **{f"occupancy_{k}": v for k, v in stats.items()},
+            }
+
+            # -------------------------
+            # Histogram table
+            # -------------------------
+            for h in stdout_histogram:
+                histogram_rows.append({
+                    "experiment": metadata_data.get("experiment"),
+                    "repeat": metadata_data.get("repeat"),
+                    "queue_id": qid,
+                    "used": h["used"],
+                    "count": h["count"],
+                    "percent": h["percent"],
+                })
+
+            rows.append(row)
+
+    total_df = pd.DataFrame(rows)
+    histogram_df = pd.DataFrame(histogram_rows)
     if args.csv:
-        write_csv(args.csv, all_stats)
+        write_csv(args.csv, total_df)
+        write_csv("histogram.csv", histogram_df)
+
+
+def load_csv():
+    df = pd.read_csv("csv.csv")
+    print(df.columns)
+
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    load_csv()
