@@ -408,8 +408,10 @@ def main():
     total_df = pd.DataFrame(rows)
     histogram_df = pd.DataFrame(histogram_rows)
     if args.csv:
-        write_csv(args.csv, total_df)
-        write_csv("histogram.csv", histogram_df)
+        filename = args.csv + ".csv"
+        write_csv(filename, total_df)
+        histogram_filename = args.csv + "_histogram.csv"
+        write_csv(histogram_filename, histogram_df)
 
 
 def load_csv():
@@ -419,5 +421,5 @@ def load_csv():
 
 
 if __name__ == "__main__":
-    # main()
-    load_csv()
+    main()
+    # load_csv()
