@@ -124,11 +124,8 @@ def parse_stdout(fname):
             re.MULTILINE,
         )
 
-        # Match:
-        # used=  0 : 1 (0.0020%)
-        # used=512 : 123 (12.34%)
         histogram_re = re.compile(
-            r"^\s*used\s*=\s*(\d+)\s*:\s*(\d+)\s*"
+            r"^\s*queue\s+(\d+)\s+used\s*=\s*(\d+)\s*:\s*(\d+)\s*"
             r"\(\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\)\s*$",
             re.MULTILINE,
         )
@@ -151,9 +148,10 @@ def parse_stdout(fname):
 
                 histogram = []
 
-            for used, count, percent in histogram_re.findall(block):
+            for queue_id, used, count, percent in histogram_re.findall(block):
                 histogram.append(
                     {
+                        "queue_id": int(queue_id),
                         "used": int(used),
                         "count": int(count),
                         "percent": float(percent),
