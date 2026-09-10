@@ -323,14 +323,10 @@ def main():
         files = args.files
     elif args.dir:
         files = discover_files_from_dir(args.dir, "samples_q*.bin")
-        stdout_files = discover_files_from_dir(args.dir, "stdout.log")
+        stdout_files = discover_files_from_dir(args.dir, "samples_q*.json")
         metadata = discover_files_from_dir(args.dir, "metadata.json")
     else:
         files = discover_files(args.prefix)
-
-    if not files:
-        print("No sample files found.", file=sys.stderr)
-        sys.exit(1)
 
     print(f"Found {len(files)} sample files.")
 
@@ -342,66 +338,53 @@ def main():
     rows = []
     histogram_rows = []
 
-    for fnames in files:
-        for sample_fname in files:
-            run_dir = os.path.dirname(sample_fname)
+    for sample_fname in files:
+        run_dir = os.path.dirname(sample_fname)
 
-            stdout_fname = os.path.join(run_dir, "stdout.log")
-            metadata_fname = os.path.join(run_dir, "metadata.json")
+        metadata_fname = os.path.join(run_dir, "metadata.json")
 
-            qid = queue_id_from_filename(sample_fname)
-            hdr, qs_raw, data = load_samples(sample_fname)
+        qid = queue_id_from_filename(sample_fname)
 
-            occupancy = data["used"]
-            stats = compute_stats(occupancy)
+        # samples_q0.bin -> samples_q0.json
+        queue_json_fname = os.path.splitext(sample_fname)[0] + ".json"
 
-            stdout_data = parse_stdout(stdout_fname)
-            metadata_data = parse_json(metadata_fname)
+        metadata_data = parse_json(metadata_fname)
+        queue_data = parse_json(queue_json_fname)
 
-            # Find stdout entry corresponding to this queue.
-            stdout_entry = next(
-                (entry for entry in stdout_data if entry["queue"] == qid), None
-            )
-            stdout_entry = next(
-                (
-                    entry
-                    for entry in reversed(stdout_data)
-                    if int(entry.get("queue", -1)) == int(qid)
-                ),
-                None
-            )
+        # Histograms are structured separately in the JSON.
+        used_histogram = queue_data.get("used_histogram", [])
+        watermark_histogram = queue_data.get("watermark_histogram", [])
 
-            if stdout_entry is None:
-                stdout_stats = {}
-                stdout_histogram = []
-            else:
-                stdout_stats = stdout_entry.get("stats", {})
-                stdout_histogram = stdout_entry.get("histogram", [])
+        # Everything except the histograms is a scalar queue statistic.
+        queue_stats = {
+            k: v
+            for k, v in queue_data.items()
+            if k not in ("used_histogram", "watermark_histogram")
+        }
 
-            row = {
-                "queue_id": qid,
-                # metadata.json
-                **metadata_data,
-                # stdout stats
-                **{f"stdout_{k}": v for k, v in stdout_stats.items()},
-                # stats calculated from samples_q*.bin
-                **{f"occupancy_{k}": v for k, v in stats.items()},
-            }
+        row = {
+            "queue_id": qid,
 
-            # -------------------------
-            # Histogram table
-            # -------------------------
-            for h in stdout_histogram:
+            # metadata.json
+            **metadata_data,
+
+            # stats from samples_q*.json
+            **{f"queue_{k}": v for k, v in queue_stats.items()
+               if k != "queue_id"},
+        }
+
+        # Separate histogram rows
+        for hist_name in ("used_histogram", "watermark_histogram"):
+            for entry in queue_data.get(hist_name, []):
                 histogram_rows.append({
-                    "experiment": metadata_data.get("experiment"),
-                    "repeat": metadata_data.get("repeat"),
+                    **metadata_data,
                     "queue_id": qid,
-                    "used": h["used"],
-                    "count": h["count"],
-                    "percent": h["percent"],
+                    "histogram": hist_name,
+                    "value": entry["value"],
+                    "count": entry["count"],
                 })
 
-            rows.append(row)
+        rows.append(row)
 
     total_df = pd.DataFrame(rows)
     histogram_df = pd.DataFrame(histogram_rows)
