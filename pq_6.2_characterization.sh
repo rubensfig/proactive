@@ -1,0 +1,12 @@
+sudo python3 ./run_ubenchmark.py \
+	--app /home/ubuntu/dpdk/x86_64-native-linuxapp-gcc/examples/dpdk-tx_shaper_baseline \
+ 	--eal-args=--force-max-simd-bitwidth=64 \
+       	--mechanism pq \
+	--lcore-sets '1,2' \
+	--repeats 30  \
+	--rates 3125000000 \
+       	--transient-types 0 \
+       	--descs 4096 \
+       	--bursts 512  \
+	--samples 500000 \
+	--output 6.2_pq_characterization

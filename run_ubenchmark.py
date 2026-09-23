@@ -160,7 +160,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--mechanism",
         type=str.lower,
-        choices=("none", "comp", "bql", "rej"),
+        choices=("none", "comp", "bql", "rej", "pq"),
         default="none",
         help=(
             "Controller compiled into the probe. Selects which runtime "
