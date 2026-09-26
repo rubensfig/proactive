@@ -197,6 +197,15 @@ def parse_args() -> argparse.Namespace:
         default=[32],
         help="REJ -K success-streak values (default: %(default)s)",
     )
+    p.add_argument(
+        "--duty-cycle",
+        type=comma_separated_ints,
+        default=[15],
+        help=(
+            "Comma-separated transient duty-cycle values to sweep, "
+            "e.g. 10,15,25 (default: %(default)s)"
+        ),
+    )
 
     # Repetition / experiment management.
     p.add_argument(
@@ -276,6 +285,8 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if any(v not in (0, 1, 2) for v in args.transient_types):
         raise SystemExit("all --transient-types values must be one of: 0,1,2")
+    if any(v < 0 or v > 100 for v in args.duty_cycle):
+        raise SystemExit("all --duty-cycle values must be between 0 and 100")
 
     lcore_sets = selected_lcore_sets(args)
     if not lcore_sets or any(not value.strip() for value in lcore_sets):
@@ -296,7 +307,7 @@ def validate_args(args: argparse.Namespace) -> None:
 
 
 def controller_parameter_sets(args: argparse.Namespace) -> list[dict[str, int]]:
-    """Return only the parameter dimensions relevant to the selected binary."""
+    """Return only the controller parameters relevant to the selected binary."""
     if args.mechanism == "comp":
         return [
             {"comp_near_steps": near_steps}
@@ -354,6 +365,7 @@ def build_command(
     burst: int,
     sleep_ns: int,
     transient_type: int,
+    duty_cycle: int,
     controller_params: dict[str, int],
     sample_base: Path,
 ) -> list[str]:
@@ -391,6 +403,8 @@ def build_command(
             str(args.samples),
             "-T",
             str(transient_type),
+            "-D",
+            str(duty_cycle),
             "-o",
             str(sample_base),
         ]
@@ -436,12 +450,14 @@ def experiment_name(
     burst: int,
     sleep_ns: int,
     transient_type: int,
+    duty_cycle: int,
     mechanism: str,
     controller_params: dict[str, int],
 ) -> str:
     name = (
         f"cores_{lcore_label(lcores)}_"
         f"T_{transient_type}_"
+        f"duty_{duty_cycle:03d}_"
         f"desc_{nb_desc:04d}_"
         f"rate_{rate_bps:010d}_"
         f"burst_{burst:03d}_"
@@ -518,9 +534,10 @@ def main() -> int:
             burst,
             sleep_ns,
             transient_type,
+            duty_cycle,
             controller_params,
         )
-        for lcores, nb_desc, rate_bps, burst, sleep_ns, transient_type
+        for lcores, nb_desc, rate_bps, burst, sleep_ns, transient_type, duty_cycle
         in itertools.product(
             lcore_sets,
             args.descs,
@@ -528,6 +545,7 @@ def main() -> int:
             args.bursts,
             args.sleep_values,
             args.transient_types,
+            args.duty_cycle,
         )
         for controller_params in controller_sets
     ]
@@ -537,6 +555,7 @@ def main() -> int:
     print(f"Application : {app}")
     print(f"Lcore sets  : {', '.join(lcore_sets)}")
     print(f"Transient T : {','.join(str(x) for x in args.transient_types)}")
+    print(f"Duty cycles : {','.join(str(x) for x in args.duty_cycle)}")
     print(f"Mechanism   : {args.mechanism.upper()}")
     print(f"Experiments : {len(combinations)} parameter combinations")
     print(f"Repeats     : {args.repeats}")
@@ -552,6 +571,7 @@ def main() -> int:
         "app": str(app),
         "lcore_sets": lcore_sets,
         "transient_types": args.transient_types,
+        "duty_cycle": args.duty_cycle,
         "port": args.port,
         "descs": args.descs,
         "rates_bps": args.rates,
@@ -576,6 +596,7 @@ def main() -> int:
         burst,
         sleep_ns,
         transient_type,
+        duty_cycle,
         controller_params,
     ) in combinations:
         exp_name = experiment_name(
@@ -585,6 +606,7 @@ def main() -> int:
             burst=burst,
             sleep_ns=sleep_ns,
             transient_type=transient_type,
+            duty_cycle=duty_cycle,
             mechanism=args.mechanism,
             controller_params=controller_params,
         )
@@ -612,6 +634,7 @@ def main() -> int:
                 transient_type=transient_type,
                 controller_params=controller_params,
                 sample_base=sample_base,
+                duty_cycle=duty_cycle,
             )
 
             controller_text = format_controller_params(
@@ -625,6 +648,7 @@ def main() -> int:
                 f"mech={args.mechanism} "
                 f"lcores={lcores} "
                 f"T={transient_type} "
+                f"duty={duty_cycle}% "
                 f"desc={nb_desc} "
                 f"rate={rate_bps} "
                 f"burst={burst} "
@@ -643,6 +667,7 @@ def main() -> int:
                 "burst": burst,
                 "sleep_ns": sleep_ns,
                 "transient_type": transient_type,
+                "duty_cycle": duty_cycle,
                 "samples_per_queue": args.samples,
                 "mechanism": args.mechanism,
                 "mechanism_parameters": controller_params,
