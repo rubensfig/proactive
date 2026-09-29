@@ -1,12 +1,14 @@
 sudo python3 ./run_ubenchmark.py \
 	--app /home/ubuntu/marvell-dpdk/arm64-build/examples/dpdk-tx_shaper_baseline \
-       	--mechanism pq \
-	--lcore-sets '1,2' \
+       	--mechanism rej \
+	--lcore-sets '1,2;1,2,3,4,5,6,7,8,9' \
 	--repeats 30  \
 	--rates 3125000000 \
-       	--transient-types 0 \
+       	--transient-types 1 \
        	--descs 4096 \
        	--bursts 512  \
 	--samples 500000 \
-	--output 6.2_pq_characterization
- 	# --eal-args=--force-max-simd-bitwidth=64 \
+	--rej-add-step 64,256 \
+	--rej-grow-streak 8,32 \
+	--duty-cycle 1,5,10,20 \
+	--output REJ
