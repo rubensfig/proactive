@@ -2,9 +2,9 @@
 """
 analyze_tx_samples.py
 
-Reads the raw uint16 occupancy-sample files written by the DPDK TX worker
-(one file per queue: "<outfile_base>_q<N>.bin", little-endian uint16 array)
-and produces summary statistics, percentiles, and optional histogram plots.
+Collects the per-queue results written by tx_shaper_baseline
+("<outfile_base>_q<N>.json" and ".bin") and the run_ubenchmark.py metadata
+into summary CSVs.
 
 Usage:
     # Auto-discover all "<prefix>_q*.bin" files in a directory
@@ -45,10 +45,17 @@ HEADER_DTYPE = np.dtype(
 )
 
 
+# Must match struct sample_record in tx_shaper_baseline/main.c (72 bytes).
 SAMPLE_DTYPE = np.dtype(
     [
         ("used", "<u4"),
         ("space", "<u4"),
+        ("limit", "<u4"),
+        ("freed", "<u4"),
+        ("high_wm", "<u4"),
+        ("observed_step", "<u4"),
+        ("wm_valid", "u1"),
+        ("reserved1", "u1", (3,)),
         ("requested", "<u2"),
         ("to_send", "<u2"),
         ("sent", "<u2"),
@@ -58,6 +65,7 @@ SAMPLE_DTYPE = np.dtype(
         ("cycles_count", "<u8"),
         ("cycles_tx", "<u8"),
         ("cycles_total", "<u8"),
+        ("tsc", "<u8"),
     ],
     align=True,
 )
@@ -136,34 +144,25 @@ def parse_stdout(fname):
             queue_id = int(matchs.group(1))
             block = matchs.group(2)
 
-        # Everything before histogram heading is the main stats section.
-        stats_text = block.split("TX queue-count histogram:", 1)[0]
+            # Everything before the histogram heading is the main stats section.
+            stats_text = block.split("TX queue-count histogram:", 1)[0]
 
-        stats = {}
-        for key, value in field_re.findall(stats_text):
-            if "." in value:
-                stats[key] = float(value)
-            else:
-                stats[key] = int(value)
+            stats = {}
+            for key, value in field_re.findall(stats_text):
+                stats[key] = float(value) if "." in value else int(value)
 
-                histogram = []
-
-            for queue_id, used, count, percent in histogram_re.findall(block):
-                histogram.append(
-                    {
-                        "queue_id": int(queue_id),
-                        "used": int(used),
-                        "count": int(count),
-                        "percent": float(percent),
-                    }
-                )
+            histogram = [
+                {
+                    "queue_id": int(qid),
+                    "used": int(used),
+                    "count": int(count),
+                    "percent": float(percent),
+                }
+                for qid, used, count, percent in histogram_re.findall(block)
+            ]
 
             results.append(
-                {
-                    "queue": queue_id,
-                    "stats": stats,
-                    "histogram": histogram,
-                }
+                {"queue": queue_id, "stats": stats, "histogram": histogram}
             )
 
         return results

@@ -1,41 +1,44 @@
 #!/usr/bin/env python3
 """
-Repeated experiment runner for tx_occupancy_probe.
+Repeated experiment runner for the tx_shaper_baseline microbenchmark
+(dpdk/examples/tx_shaper_baseline).
 
 The runner sweeps:
   * lcore configurations
-  * descriptor count / shaping rate / burst / pacing
-  * transient type: -T 0, -T 1, -T 2 by default
-  * mechanism-specific runtime controller parameters
+  * descriptor count / shaping rate / burst
+  * transient type: -T 0, -T 1, -T 2 by default, and its period (-D)
+  * controller-specific runtime parameters
 
-Controller parameters:
-  COMP: -N <near_steps>
-  BQL : -I <interval_us> -G <grow_step>
-  REJ : -A <add_step> -K <grow_streak>
+The controller is selected when the binary is built (tx_controller in
+meson.build). --mechanism must match it; after every run the runner checks
+the "mechanism" field the binary writes into samples_q*.json.
+
+Controllers (names as in the paper) and their runtime parameters:
+  none : Uncoordinated                         (no parameters)
+  pab  : Priority-Aware Backpressure           (no parameters)
+  rej  : REJ, outcome-based window             -A <add_step> -K <grow_streak>
+  cbc  : Completion-Based Capacity, Alg. 1     -I <poll_us>   (T_poll)
+  qbc  : Queue Occupancy-Based Capacity, Alg. 2 (no parameters)
 
 Lcore sweep example:
   --lcore-sets '1,2;1,2,3;1,2,3,4'
 
 Each semicolon-separated entry is passed verbatim to DPDK as "-l <entry>".
-If --lcore-sets is omitted, the legacy single --lcores value is used.
-
-By default, every other parameter combination is run once for each transient
-mode 0, 1, and 2.  Use --transient-types to select a subset if needed.
+If --lcore-sets is omitted, the single --lcores value is used.
 
 Example:
-  sudo ./run_ubenchmark_adapted.py \
-      --app ./tx_occupancy_probe_rej \
-      --mechanism rej \
+  sudo ./run_ubenchmark.py \
+      --app ./dpdk-tx_shaper_baseline \
+      --mechanism cbc \
       --lcore-sets '1,2;1,2,3;1,2,3,4' \
-      --transient-types 0,1,2 \
-      --rej-add-step 4,8,16 \
-      --rej-grow-streak 8,16,32,64 \
-      --descs 256 \
-      --rates 125000000 \
-      --bursts 32 \
-      --samples 5000000 \
+      --transient-types 0,1 \
+      --cbc-poll-us 1,10,100 \
+      --descs 4096 \
+      --rates 3125000000 \
+      --bursts 512 \
+      --samples 500000 \
       --repeats 5 \
-      --output results_rej
+      --output results_cbc
 """
 
 from __future__ import annotations
@@ -51,6 +54,9 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+
+
+MECHANISMS = ("none", "pab", "rej", "cbc", "qbc")
 
 
 def comma_separated_ints(value: str) -> list[int]:
@@ -75,15 +81,15 @@ def semicolon_separated_strings(value: str) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Repeated experiment runner for tx_occupancy_probe"
+        description="Repeated experiment runner for tx_shaper_baseline"
     )
 
     # Program / EAL configuration.
     p.add_argument(
         "--app",
         type=Path,
-        default=Path("./tx_occupancy_probe"),
-        help="Path to tx_occupancy_probe executable",
+        default=Path("./dpdk-tx_shaper_baseline"),
+        help="Path to the tx_shaper_baseline executable",
     )
     p.add_argument(
         "--lcores",
@@ -122,8 +128,8 @@ def parse_args() -> argparse.Namespace:
         type=comma_separated_ints,
         default=[125_000_000],
         help=(
-            "Comma-separated rte_tm shaping rates in bps, "
-            "e.g. 125000000,250000000,1000000000; 0 disables shaping"
+            "Comma-separated rte_tm shaping rates in BYTES/s (rte_tm "
+            "convention), e.g. 3125000000 = 25 Gbit/s; 0 disables shaping"
         ),
     )
     p.add_argument(
@@ -131,13 +137,6 @@ def parse_args() -> argparse.Namespace:
         type=comma_separated_ints,
         default=[32],
         help="Comma-separated requested tx_burst sizes",
-    )
-    p.add_argument(
-        "--sleep-ns",
-        dest="sleep_values",
-        type=comma_separated_ints,
-        default=[0],
-        help="Comma-separated busy-loop delays in ns",
     )
     p.add_argument(
         "--samples",
@@ -160,30 +159,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--mechanism",
         type=str.lower,
-        choices=("none", "comp", "bql", "rej", "pq"),
+        choices=MECHANISMS,
         default="none",
         help=(
-            "Controller compiled into the probe. Selects which runtime "
-            "controller parameters are swept/passed (default: %(default)s)"
+            "Controller compiled into the binary (tx_controller in "
+            "meson.build). Selects which runtime parameters are swept "
+            "(default: %(default)s)"
         ),
     )
     p.add_argument(
-        "--comp-near-steps",
-        type=comma_separated_ints,
-        default=[16],
-        help="COMP -N values to sweep (default: %(default)s)",
-    )
-    p.add_argument(
-        "--bql-interval-us",
+        "--cbc-poll-us",
         type=comma_separated_ints,
         default=[10],
-        help="BQL -I cleanup/update intervals in us (default: %(default)s)",
-    )
-    p.add_argument(
-        "--bql-grow-step",
-        type=comma_separated_ints,
-        default=[64],
-        help="BQL -G grow-step values (default: %(default)s)",
+        help="CBC -I completion polling intervals T_poll in us "
+        "(default: %(default)s)",
     )
     p.add_argument(
         "--rej-add-step",
@@ -202,8 +191,8 @@ def parse_args() -> argparse.Namespace:
         type=comma_separated_ints,
         default=[15],
         help=(
-            "Comma-separated transient duty-cycle values to sweep, "
-            "e.g. 10,15,25 (default: %(default)s)"
+            "Comma-separated on/off periods in ms for transient type 1 "
+            "(-D), e.g. 1,5,10,20 (default: %(default)s)"
         ),
     )
 
@@ -280,75 +269,28 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("all --rates values must be >= 0")
     if any(v <= 0 for v in args.bursts):
         raise SystemExit("all --bursts values must be > 0")
-    if any(v < 0 for v in args.sleep_values):
-        raise SystemExit("all --sleep-ns values must be >= 0")
 
     if any(v not in (0, 1, 2) for v in args.transient_types):
         raise SystemExit("all --transient-types values must be one of: 0,1,2")
-    if any(v < 0 or v > 100 for v in args.duty_cycle):
-        raise SystemExit("all --duty-cycle values must be between 0 and 100")
+    if any(v <= 0 for v in args.duty_cycle):
+        raise SystemExit("all --duty-cycle values must be > 0 (ms)")
 
     lcore_sets = selected_lcore_sets(args)
     if not lcore_sets or any(not value.strip() for value in lcore_sets):
         raise SystemExit("at least one non-empty lcore configuration is required")
 
-    # COMP near_steps=0 is deliberately allowed as a useful baseline that
-    # effectively removes the near-watermark region.
-    if any(v < 0 for v in args.comp_near_steps):
-        raise SystemExit("all --comp-near-steps values must be >= 0")
-    if any(v <= 0 for v in args.bql_interval_us):
-        raise SystemExit("all --bql-interval-us values must be > 0")
-    if any(v <= 0 for v in args.bql_grow_step):
-        raise SystemExit("all --bql-grow-step values must be > 0")
+    if any(v <= 0 for v in args.cbc_poll_us):
+        raise SystemExit("all --cbc-poll-us values must be > 0")
     if any(v <= 0 for v in args.rej_add_step):
         raise SystemExit("all --rej-add-step values must be > 0")
     if any(v <= 0 for v in args.rej_grow_streak):
         raise SystemExit("all --rej-grow-streak values must be > 0")
 
 
-def controller_parameter_sets(args: argparse.Namespace) -> list[dict[str, int]]:
-    """Return only the controller parameters relevant to the selected binary."""
-    if args.mechanism == "comp":
-        return [
-            {"comp_near_steps": near_steps}
-            for near_steps in args.comp_near_steps
-        ]
-
-    if args.mechanism == "bql":
-        return [
-            {
-                "bql_interval_us": interval_us,
-                "bql_grow_step": grow_step,
-            }
-            for interval_us, grow_step in itertools.product(
-                args.bql_interval_us,
-                args.bql_grow_step,
-            )
-        ]
-
-    if args.mechanism == "rej":
-        return [
-            {
-                "rej_add_step": add_step,
-                "rej_grow_streak": grow_streak,
-            }
-            for add_step, grow_streak in itertools.product(
-                args.rej_add_step,
-                args.rej_grow_streak,
-            )
-        ]
-
-    return [{}]
-
-
 def active_parameter_grid(args: argparse.Namespace) -> dict[str, list[int]]:
-    if args.mechanism == "comp":
-        return {"comp_near_steps": args.comp_near_steps}
-    if args.mechanism == "bql":
-        return {
-            "bql_interval_us": args.bql_interval_us,
-            "bql_grow_step": args.bql_grow_step,
-        }
+    """Runtime parameters of the selected controller, as name -> values."""
+    if args.mechanism == "cbc":
+        return {"cbc_poll_us": args.cbc_poll_us}
     if args.mechanism == "rej":
         return {
             "rej_add_step": args.rej_add_step,
@@ -357,13 +299,26 @@ def active_parameter_grid(args: argparse.Namespace) -> dict[str, list[int]]:
     return {}
 
 
+def controller_parameter_sets(args: argparse.Namespace) -> list[dict[str, int]]:
+    """Cartesian product of the selected controller's parameter values."""
+    grid = active_parameter_grid(args)
+    return [dict(zip(grid, values)) for values in itertools.product(*grid.values())]
+
+
+# Runtime option of the binary for each controller parameter.
+PARAM_FLAGS = {
+    "cbc_poll_us": "-I",
+    "rej_add_step": "-A",
+    "rej_grow_streak": "-K",
+}
+
+
 def build_command(
     args: argparse.Namespace,
     lcores: str,
     nb_desc: int,
     rate_bps: int,
     burst: int,
-    sleep_ns: int,
     transient_type: int,
     duty_cycle: int,
     controller_params: dict[str, int],
@@ -397,8 +352,6 @@ def build_command(
             str(rate_bps),
             "-m",
             str(burst),
-            "-s",
-            str(sleep_ns),
             "-c",
             str(args.samples),
             "-T",
@@ -410,26 +363,8 @@ def build_command(
         ]
     )
 
-    if args.mechanism == "comp":
-        cmd.extend(["-N", str(controller_params["comp_near_steps"])])
-    elif args.mechanism == "bql":
-        cmd.extend(
-            [
-                "-I",
-                str(controller_params["bql_interval_us"]),
-                "-G",
-                str(controller_params["bql_grow_step"]),
-            ]
-        )
-    elif args.mechanism == "rej":
-        cmd.extend(
-            [
-                "-A",
-                str(controller_params["rej_add_step"]),
-                "-K",
-                str(controller_params["rej_grow_streak"]),
-            ]
-        )
+    for name, value in controller_params.items():
+        cmd.extend([PARAM_FLAGS[name], str(value)])
 
     if args.app_args:
         cmd.extend(shlex.split(args.app_args))
@@ -448,7 +383,6 @@ def experiment_name(
     nb_desc: int,
     rate_bps: int,
     burst: int,
-    sleep_ns: int,
     transient_type: int,
     duty_cycle: int,
     mechanism: str,
@@ -460,17 +394,11 @@ def experiment_name(
         f"duty_{duty_cycle:03d}_"
         f"desc_{nb_desc:04d}_"
         f"rate_{rate_bps:010d}_"
-        f"burst_{burst:03d}_"
-        f"sleep_{sleep_ns}"
+        f"burst_{burst:03d}"
     )
 
-    if mechanism == "comp":
-        name += f"_comp_near_{controller_params['comp_near_steps']:04d}"
-    elif mechanism == "bql":
-        name += (
-            f"_bql_int_{controller_params['bql_interval_us']:04d}us"
-            f"_grow_{controller_params['bql_grow_step']:04d}"
-        )
+    if mechanism == "cbc":
+        name += f"_cbc_poll_{controller_params['cbc_poll_us']:04d}us"
     elif mechanism == "rej":
         name += (
             f"_rej_add_{controller_params['rej_add_step']:04d}"
@@ -480,20 +408,21 @@ def experiment_name(
     return name
 
 
-def format_controller_params(mechanism: str, params: dict[str, int]) -> str:
-    if mechanism == "comp":
-        return f"near={params['comp_near_steps']}"
-    if mechanism == "bql":
-        return (
-            f"interval={params['bql_interval_us']}us "
-            f"grow={params['bql_grow_step']}"
-        )
-    if mechanism == "rej":
-        return (
-            f"add={params['rej_add_step']} "
-            f"streak={params['rej_grow_streak']}"
-        )
-    return ""
+def format_controller_params(params: dict[str, int]) -> str:
+    return " ".join(f"{k}={v}" for k, v in params.items())
+
+
+def binary_mechanism(run_dir: Path) -> str | None:
+    """Controller the binary reports in samples_q*.json, lower-case."""
+    for path in sorted(run_dir.glob("samples_q*.json")):
+        try:
+            with path.open(encoding="utf-8") as f:
+                value = json.load(f).get("mechanism")
+        except (OSError, ValueError):
+            continue
+        if value:
+            return str(value).lower()
+    return None
 
 
 def write_json(path: Path, data: dict) -> None:
@@ -532,18 +461,16 @@ def main() -> int:
             nb_desc,
             rate_bps,
             burst,
-            sleep_ns,
             transient_type,
             duty_cycle,
             controller_params,
         )
-        for lcores, nb_desc, rate_bps, burst, sleep_ns, transient_type, duty_cycle
+        for lcores, nb_desc, rate_bps, burst, transient_type, duty_cycle
         in itertools.product(
             lcore_sets,
             args.descs,
             args.rates,
             args.bursts,
-            args.sleep_values,
             args.transient_types,
             args.duty_cycle,
         )
@@ -576,7 +503,6 @@ def main() -> int:
         "descs": args.descs,
         "rates_bps": args.rates,
         "bursts": args.bursts,
-        "sleep_ns": args.sleep_values,
         "samples_per_queue": args.samples,
         "mechanism": args.mechanism,
         "mechanism_parameter_grid": active_parameter_grid(args),
@@ -594,7 +520,6 @@ def main() -> int:
         nb_desc,
         rate_bps,
         burst,
-        sleep_ns,
         transient_type,
         duty_cycle,
         controller_params,
@@ -604,7 +529,6 @@ def main() -> int:
             nb_desc=nb_desc,
             rate_bps=rate_bps,
             burst=burst,
-            sleep_ns=sleep_ns,
             transient_type=transient_type,
             duty_cycle=duty_cycle,
             mechanism=args.mechanism,
@@ -630,16 +554,13 @@ def main() -> int:
                 nb_desc=nb_desc,
                 rate_bps=rate_bps,
                 burst=burst,
-                sleep_ns=sleep_ns,
                 transient_type=transient_type,
                 controller_params=controller_params,
                 sample_base=sample_base,
                 duty_cycle=duty_cycle,
             )
 
-            controller_text = format_controller_params(
-                args.mechanism, controller_params
-            )
+            controller_text = format_controller_params(controller_params)
             if controller_text:
                 controller_text = " " + controller_text
 
@@ -648,11 +569,10 @@ def main() -> int:
                 f"mech={args.mechanism} "
                 f"lcores={lcores} "
                 f"T={transient_type} "
-                f"duty={duty_cycle}% "
+                f"D={duty_cycle}ms "
                 f"desc={nb_desc} "
                 f"rate={rate_bps} "
-                f"burst={burst} "
-                f"sleep={sleep_ns}ns"
+                f"burst={burst}"
                 f"{controller_text} "
                 f"repeat={repeat}/{args.repeats}"
             )
@@ -665,7 +585,6 @@ def main() -> int:
                 "nb_tx_desc": nb_desc,
                 "rate_bps": rate_bps,
                 "burst": burst,
-                "sleep_ns": sleep_ns,
                 "transient_type": transient_type,
                 "duty_cycle": duty_cycle,
                 "samples_per_queue": args.samples,
@@ -747,6 +666,21 @@ def main() -> int:
             metadata["elapsed_seconds"] = elapsed
             metadata["returncode"] = returncode
             metadata["success"] = returncode == 0
+
+            # Guard against running a binary built for another controller.
+            built = binary_mechanism(run_dir)
+            metadata["binary_mechanism"] = built
+            if returncode == 0 and built is not None and built != args.mechanism:
+                metadata["success"] = False
+                metadata["error"] = (
+                    f"binary was built for {built}, not {args.mechanism}"
+                )
+                returncode = 2
+                print(
+                    f"  ERROR: {metadata['error']} (tx_controller in "
+                    "meson.build)",
+                    file=sys.stderr,
+                )
 
             # Record the files actually produced by the application.
             sample_files = sorted(run_dir.glob("samples_q*.bin"))

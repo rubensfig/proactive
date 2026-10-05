@@ -1,12 +1,14 @@
+#!/bin/sh
+# REJ (paper appendix), Octeon. Build with tx_controller = 'rej'.
 sudo python3 ./run_ubenchmark.py \
 	--app /home/ubuntu/marvell-dpdk/arm64-build/examples/dpdk-tx_shaper_baseline \
-       	--mechanism rej \
+	--mechanism rej \
 	--lcore-sets '1,2;1,2,3,4,5,6,7,8,9' \
-	--repeats 30  \
+	--repeats 30 \
 	--rates 3125000000 \
-       	--transient-types 1 \
-       	--descs 4096 \
-       	--bursts 512  \
+	--transient-types 1 \
+	--descs 4096 \
+	--bursts 512 \
 	--samples 500000 \
 	--rej-add-step 64,256 \
 	--rej-grow-streak 8,32 \
