@@ -147,10 +147,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--transient-types",
         type=comma_separated_ints,
-        default=[0, 1, 2],
+        default=[0, 1, 2, 3],
         help=(
             "Transient -T values to sweep. By default every combination is "
-            "run with -T 0, -T 1, and -T 2 (default: 0,1,2)"
+            "run with -T 0, -T 1, and -T 2 (default: 0,1,2,3)"
         ),
     )
 
@@ -270,8 +270,8 @@ def validate_args(args: argparse.Namespace) -> None:
     if any(v <= 0 for v in args.bursts):
         raise SystemExit("all --bursts values must be > 0")
 
-    if any(v not in (0, 1, 2) for v in args.transient_types):
-        raise SystemExit("all --transient-types values must be one of: 0,1,2")
+    if any(v not in (0, 1, 2, 3) for v in args.transient_types):
+        raise SystemExit("all --transient-types values must be one of: 0,1,2,3")
     if any(v <= 0 for v in args.duty_cycle):
         raise SystemExit("all --duty-cycle values must be > 0 (ms)")
 
